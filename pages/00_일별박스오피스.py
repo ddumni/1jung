@@ -1,17 +1,17 @@
-#영화 sample
-import streamlit as st
-import pandas as pd
-import requests
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+import altair as alt
+import pandas as pd
+import requests
+import streamlit as st
 
 st.set_page_config(page_title="박스오피스 대시보드", layout="wide")
 st.title("🎬 어제의 박스오피스")
 
-# 비밀 금고에서 인증키 꺼내기 (코드에는 키를 적지 않는다)
+# 비밀 금고에서 인증키 꺼내기
 KOBIS_KEY = st.secrets["KOBIS_KEY"]
 
-# 한국 시간 기준 어제 날짜를 여덟 자리로 (배포 서버 시계는 외국 기준일 수 있다)
+# 한국 시간 기준 어제 날짜 구하기
 yesterday = datetime.now(ZoneInfo("Asia/Seoul")) - timedelta(days=1)
 target_dt = yesterday.strftime("%Y%m%d")
 st.caption(f"조회 기준일(어제): {yesterday.strftime('%Y-%m-%d')}")
@@ -25,9 +25,10 @@ if res.status_code != 200:
 
 data = res.json()
 
-# KOBIS는 키가 틀려도 상태코드 200을 준다. 대신 faultInfo 상자가 온다.
 if "faultInfo" in data:
-    st.error("인증키가 올바르지 않습니다. 금고(Secrets)의 KOBIS_KEY를 확인해 주세요.")
+    st.error(
+        "인증키가 올바르지 않습니다. 금고(Secrets)의 KOBIS_KEY를 확인해 주세요."
+    )
     st.stop()
 
 box_list = data.get("boxOfficeResult", {}).get("dailyBoxOfficeList", [])
@@ -37,9 +38,17 @@ if not box_list:
 
 df = pd.DataFrame(box_list)
 
-# 글자로 온 숫자들을 진짜 숫자로 바꾸기
+# 숫자로 타입 변환
 for col in ["rank", "audiCnt", "audiAcc", "scrnCnt", "showCnt"]:
     df[col] = pd.to_numeric(df[col])
+
+# 🏆 누적관객 100만 명 이상인 영화 이름 뒤에 트로피 이모지 추가
+df["movieNm"] = df.apply(
+    lambda row: f"{row['movieNm']} 🏆"
+    if row["audiAcc"] >= 1000000
+    else row["movieNm"],
+    axis=1,
+)
 
 # 1위 영화 지표 카드 세 장
 top = df.sort_values("rank").iloc[0]
@@ -54,8 +63,40 @@ table.columns = ["순위", "영화명", "개봉일", "관객수", "누적관객"
 table = table.sort_values("순위").reset_index(drop=True)
 
 st.subheader("📋 박스오피스 TOP 10")
-st.dataframe(table)
+st.dataframe(table, use_container_width=True)
 
+# 📈 관객수 상위 5편 차트 (Altair 활용)
 st.subheader("📈 관객수 상위 5편")
 top5 = table.sort_values("관객수", ascending=False).head(5)
-st.bar_chart(top5.set_index("영화명")["관객수"])
+
+# 1위 영화 강조용 색상 컬럼 추가
+max_audi = top5["관객수"].max()
+top5["highlight"] = top5["관객수"].apply(
+    lambda x: "1위" if x == max_audi else "기타"
+)
+
+# Altair 바 차트 생성 (왼쪽부터 내림차순 정렬 & 1위만 튀는 색상 적용)
+chart = (
+    alt.Chart(top5)
+    .mark_bar()
+    .encode(
+        x=alt.X(
+            "영화명:N",
+            sort=top5["영화명"].tolist(),  # 왼쪽부터 관객수 내림차순으로 x축 순서 고정
+            axis=alt.Axis(labelAngle=-25, title=None),  # 라벨 각도 조정
+        ),
+        y=alt.Y("관객수:Q", title="어제 관객수 (명)"),
+        color=alt.Color(
+            "highlight:N",
+            scale=alt.Scale(
+                domain=["1위", "기타"],
+                range=["#FF4B4B", "#808080"],  # 1위: 포인트 빨간색, 기타: 회색
+            ),
+            legend=None,  # 범례 숨김
+        ),
+        tooltip=["영화명", "관객수", "누적관객"],
+    )
+    .properties(height=400)
+)
+
+st.altair_chart(chart, use_container_width=True)
