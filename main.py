@@ -1,108 +1,146 @@
-#sample
-import re
-import requests
-import pandas as pd
+#jemini 25-35세 비율
 import streamlit as st
+import pandas as pd
+import requests
 import plotly.express as px
 
-st.set_page_config(page_title="전국 고령화 지도", layout="wide")
-st.title("🗺️ 전국 고령화 지도")
-st.caption("시군구별 65세 이상 인구 비율 (행정안전부 주민등록 인구)")
+# 1. 페이지 기본 설정 (와이드 모드)
+st.set_page_config(
+    page_title="전국 청년 인구 지도 (25~35세)",
+    page_icon="🗺️",
+    layout="wide"
+)
 
-POP_URL = "https://raw.githubusercontent.com/greatsong/modudata/main/data/population_yearly.csv.gz"
-GEO_URL = "https://raw.githubusercontent.com/greatsong/modudata/main/data/boundaries/sigungu_kr.geojson"
+st.title("🗺️ 전국 시군구별 청년 인구 비율 지도 (25~35세)")
+st.markdown("읍·면·동별 인구 데이터를 시군구(코드 앞 5자리) 단위로 집계하여 25~35세 청년 비율을 단계구분도로 나타낸 지도입니다.")
 
+# 2. 캐싱을 활용한 데이터 로딩 함수 (앱 속도 향상)
+@st.cache_data
+def load_data():
+    # --- A. 인구 데이터 불러오기 ---
+    pop_url = "https://raw.githubusercontent.com/greatsong/modudata/main/data/population_yearly.csv.gz"
+    
+    # '코드' 열은 5자리 자르기 및 매핑을 위해 문자열(str)로 지정하여 읽기
+    df = pd.read_csv(pop_url, dtype={'코드': str})
+    
+    # 가장 최신 연도 데이터만 필터링
+    latest_year = df['연도'].max()
+    df_latest = df[df['연도'] == latest_year].copy()
+    
+    # 행정동 코드(10자리) 앞 5자리를 추출하여 '시군구코드' 열 생성
+    df_latest['시군구코드'] = df_latest['코드'].str[:5]
+    
+    # --- B. 청년 인구 및 총인구 계산 ---
+    # 25세~35세에 해당하는 '계_XX세' 열 이름 리스트 생성
+    youth_cols = [f'계_{age}세' for age in range(25, 36)]
+    
+    # 전체 연령대('계_0세' ~ '계_100세 이상') 열 이름 리스트 생성
+    total_cols = [f'계_{age}세' for age in range(0, 100)] + ['계_100세 이상']
+    
+    # 각 읍면동별 청년수 및 총인구 합계 계산
+    df_latest['청년인구'] = df_latest[youth_cols].sum(axis=1)
+    df_latest['총인구'] = df_latest[total_cols].sum(axis=1)
+    
+    # 시군구코드(5자리) 기준으로 그룹화하여 합산
+    # (시도, 시군구 이름은 대표값 1개 선택)
+    grouped = df_latest.groupby('시군구코드').agg({
+        '시도': 'first',
+        '시군구': 'first',
+        '청년인구': 'sum',
+        '총인구': 'sum'
+    }).reset_index()
+    
+    # 청년 비율(%) 계산
+    grouped['청년비율'] = (grouped['청년인구'] / grouped['총인구']) * 100
+    grouped['청년비율'] = grouped['청년비율'].round(2)
+    
+    # --- C. GeoJSON 지도 경계 데이터 불러오기 ---
+    geojson_url = "https://raw.githubusercontent.com/greatsong/modudata/main/data/boundaries/sigungu_kr.geojson"
+    geojson_data = requests.get(geojson_url).json()
+    
+    return latest_year, grouped, geojson_data
 
-@st.cache_data(show_spinner="인구 데이터를 불러오는 중입니다...")
-def load_population():
-    # '코드' 열은 앞자리 0이 사라지지 않게 글자로 읽습니다
-    return pd.read_csv(POP_URL, dtype={"코드": str})
+# 데이터 로드 실행
+with st.spinner("데이터를 읽어오는 중입니다..."):
+    latest_year, df_sigungu, geojson_kr = load_data()
 
+st.caption(f"기준 연도: {latest_year}년")
 
-@st.cache_data(show_spinner="지도 경계를 불러오는 중입니다...")
-def load_geojson():
-    return requests.get(GEO_URL, timeout=30).json()
+# 3. 5단계 구간 나누기 및 색상 설정
+# 구간: 미만 19%, 19~23%, 23~28%, 28~38%, 38% 이상
+bins = [-float('inf'), 19, 23, 28, 38, float('inf')]
+labels = ['19% 미만', '19% 이상 ~ 23% 미만', '23% 이상 ~ 28% 미만', '28% 이상 ~ 38% 미만', '38% 이상']
 
+# 비율에 따라 범주형 열 생성 (순서 보장을 위해 Categorical 지정)
+df_sigungu['구간'] = pd.cut(df_sigungu['청년비율'], bins=bins, labels=labels, right=False)
+df_sigungu['구간'] = pd.Categorical(df_sigungu['구간'], categories=labels, ordered=True)
 
-df = load_population()
-geojson = load_geojson()
-
-# 1. 가장 최신 연도만 사용
-latest_year = int(df["연도"].max())
-df = df[df["연도"] == latest_year].copy()
-
-# 2. '계_'로 시작하는 나이 열만 (남_·여_ 열까지 더하면 두 배가 됩니다)
-total_cols = [c for c in df.columns if c.startswith("계_")]
-
-
-def age_of(col):
-    m = re.match(r"계_(\d+)세", col)
-    return int(m.group(1)) if m else None
-
-
-# 3. 그중 65세 이상 열만 ('계_65세' ~ '계_100세 이상')
-elderly_cols = [c for c in total_cols if age_of(c) is not None and age_of(c) >= 65]
-
-# 4. 동 단위로 전체 인구·고령 인구 계산
-df["전체인구"] = df[total_cols].sum(axis=1)
-df["고령인구"] = df[elderly_cols].sum(axis=1)
-
-# 5. '코드' 앞 5자리 = 시군구 코드 → 시군구별로 묶어 비율 계산
-df["시군구코드"] = df["코드"].str[:5]
-grouped = df.groupby("시군구코드")[["전체인구", "고령인구"]].sum().reset_index()
-grouped["고령화율"] = (grouped["고령인구"] / grouped["전체인구"] * 100).round(2)
-
-# 경계 파일에서 코드 → 시군구·시도 이름 짝 만들기
-names = pd.DataFrame([
-    {
-        "시군구코드": str(f["properties"]["코드"]),
-        "시군구": f["properties"]["시군구"],
-        "시도": f["properties"]["시도"],
-    }
-    for f in geojson["features"]
-])
-merged = grouped.merge(names, on="시군구코드", how="left")
-
-# 6. 5단계 색 구간 (전국 시군구를 다섯 덩어리로 나눈 실제 경계값)
-BINS = [0, 19, 23, 28, 38, 100]
-LABELS = ["19% 미만", "19~23%", "23~28%", "28~38%", "38% 이상"]
-COLORS = {
-    "19% 미만": "#fee6ce",
-    "19~23%": "#fdc086",
-    "23~28%": "#f79646",
-    "28~38%": "#e8590c",
-    "38% 이상": "#a63603",
+# 옅은 색(낮음) -> 진한 색(높음) 단계별 색상 매핑
+color_map = {
+    '19% 미만': '#edf8fb',
+    '19% 이상 ~ 23% 미만': '#b2e2e2',
+    '23% 이상 ~ 28% 미만': '#66c2a4',
+    '28% 이상 ~ 38% 미만': '#2ca25f',
+    '38% 이상': '#006d2c'
 }
-merged["단계"] = pd.cut(merged["고령화율"], bins=BINS, labels=LABELS, right=False)
 
-# 7. 단계구분도 그리기 (배경 지도 타일 없이 경계만)
+# 4. Plotly 지도 생성
 fig = px.choropleth(
-    merged,
-    geojson=geojson,
-    locations="시군구코드",
-    featureidkey="properties.코드",
-    color="단계",
-    category_orders={"단계": LABELS},
-    color_discrete_map=COLORS,
-    hover_name="시군구",
-    hover_data={"고령화율": True, "시도": True, "시군구코드": False, "단계": False},
-    labels={"고령화율": "65세 이상 비율(%)"},
+    df_sigungu,
+    geojson=geojson_kr,
+    locations='시군구코드',       # 데이터의 시군구코드
+    featureidkey='properties.코드', # GeoJSON 내부 속성 '코드'
+    color='구간',                 # 구간별 Discrete 색상 적용
+    color_discrete_map=color_map, # 색상 직접 할당
+    category_orders={'구간': labels}, # 범례 순서 정렬
+    hover_name='시군구',          # 마우스 오버 시 상단에 표시될 이름
+    hover_data={
+        '시군구코드': False,      # 툴팁에서 코드 숨기기
+        '시도': True,             # 시도 표시
+        '청년비율': ':.2f%'       # 비율 표시
+    },
+    labels={'구간': '청년 비율 구간', '청년비율': '청년 비율'}
 )
-fig.update_geos(fitbounds="locations", visible=False)
+
+# 지도 스타일 및 레이아웃 조정 (배경 타일 없이 경계선만 표시)
+fig.update_geos(
+    fitbounds="locations",  # 데이터 위치에 맞게 지도 자동 확대
+    visible=False           # 지리적 배경 요소(해안선, 타일 등) 숨김
+)
+
 fig.update_layout(
-    margin=dict(l=0, r=0, t=10, b=0),
-    height=700,
-    legend_title_text=f"65세 이상 비율 ({latest_year}년)",
+    margin={"r": 0, "t": 10, "l": 0, "b": 0},
+    height=650,
+    legend=dict(
+        title="<b>청년 비율 (25~35세)</b>",
+        yanchor="top",
+        y=0.98,
+        xanchor="left",
+        x=0.02,
+        bgcolor="rgba(255, 255, 255, 0.8)"
+    )
 )
 
-st.plotly_chart(fig, width="stretch")
+# 스트림릿 화면에 지도 출력
+st.plotly_chart(fig, use_container_width=True)
 
-# 8. 지도 아래 순위 표 두 개
-c1, c2 = st.columns(2)
-cols = ["시도", "시군구", "고령화율"]
-with c1:
-    st.subheader("🔴 고령화율 높은 곳 10")
-    st.dataframe(merged.nlargest(10, "고령화율")[cols].reset_index(drop=True))
-with c2:
-    st.subheader("🟢 고령화율 낮은 곳 10")
-    st.dataframe(merged.nsmallest(10, "고령화율")[cols].reset_index(drop=True))
+st.divider()
+
+# 5. 하단 순위 표 (상위 10개, 하위 10개 나란히 배치)
+st.subheader("📊 시군구별 청년 비율 극단값 비교")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.markdown("### 🔴 청년 비율 높은 곳 Top 10")
+    top10 = df_sigungu.sort_values(by='청년비율', ascending=False).head(10)
+    top10_display = top10[['시도', '시군구', '청년비율']].reset_index(drop=True)
+    top10_display.columns = ['시도', '시군구', '청년 비율 (%)']
+    st.dataframe(top10_display, use_container_width=True)
+
+with col2:
+    st.markdown("### 🔵 청년 비율 낮은 곳 Top 10")
+    bottom10 = df_sigungu.sort_values(by='청년비율', ascending=True).head(10)
+    bottom10_display = bottom10[['시도', '시군구', '청년비율']].reset_index(drop=True)
+    bottom10_display.columns = ['시도', '시군구', '청년 비율 (%)']
+    st.dataframe(bottom10_display, use_container_width=True)
