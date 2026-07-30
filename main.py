@@ -1,4 +1,4 @@
-#jemini ver2?
+#jemini ver3
 import streamlit as st
 import pandas as pd
 import requests
@@ -151,42 +151,58 @@ with col2:
 
 st.divider()
 
-# 6. 동 단위 연령별(25~35세 1살 간격) 인원수 세부 분석 표
-st.subheader("🏙️ 지역별 읍·면·동 연령별(25~35세) 청년 인원수 분석")
-st.markdown("지역(시·도)과 시·군·구를 선택하면 해당 지역 내 **읍·면·동별 25세~35세(1살 간격) 청년 인원수**를 보여줍니다.")
+# 6. 지역별 연령별(25~35세 1살 간격) 인원수 세부 분석 표
+st.subheader("🏙️ 지역별 연령별(25~35세) 청년 인원수 분석")
+st.markdown("시·도만 선택하면 **시·군·구별 표**가 출력되며, 특정 시·군·구를 선택하면 **읍·면·동별 표**로 세분화됩니다.")
 
-# Step 1: 시·도 선택
+# Step 1: 시·도 선택 (필수)
 sido_list = sorted(df_dong['시도'].dropna().unique())
 selected_sido = st.selectbox("1. 분석할 지역(시·도)을 선택하세요:", sido_list)
 
 # 선택한 시·도의 데이터 필터링
-sido_df = df_dong[df_dong['시도'] == selected_sido].copy()
+sido_dong_df = df_dong[df_dong['시도'] == selected_sido].copy()
 
-# Step 2: 시·군·구 선택
-sigungu_list = sorted(sido_df['시군구'].dropna().unique())
-selected_sigungu = st.selectbox("2. 분석할 시·군·구를 선택하세요:", sigungu_list)
+# Step 2: 시·군·구 선택 (선택 사항, 기본값은 전체)
+sigungu_options = ["전체 (시·군·구별 보기)"] + sorted(sido_dong_df['시군구'].dropna().unique())
+selected_sigungu = st.selectbox("2. 시·군·구를 선택하세요 (선택 사항):", sigungu_options)
 
-# 선택한 시·군·구의 데이터 필터링
-sigungu_df = sido_df[sido_df['시군구'] == selected_sigungu].copy()
+# 나이별 컬럼 이름을 보기 좋게 변경하기 위한 매핑 사전
+col_rename_map = {f'계_{age}세': f'{age}세 (명)' for age in range(25, 36)}
+col_rename_map['청년인구'] = '25~35세 총 청년수 (명)'
 
-if not sigungu_df.empty:
-    # 데이터 출력용 컬럼 설정 (동, 25세 ~ 35세 나이별 인원수, 청년 합계)
-    display_cols = ['동'] + age_cols + ['청년인구']
+# 조건에 따라 시·군·구 단위 또는 읍·면·동 단위 표 생성
+if selected_sigungu == "전체 (시·군·구별 보기)":
+    # --- A. 시·군·구 단위로 집계 ---
+    sido_sigungu_df = df_sigungu[df_sigungu['시도'] == selected_sido].copy()
     
-    result_df = sigungu_df[display_cols].copy()
+    display_cols = ['시군구'] + age_cols + ['청년인구']
+    result_df = sido_sigungu_df[display_cols].copy()
     
-    # 열 이름 직관적으로 수정 ('계_25세' -> '25세 (명)')
-    col_rename_map = {f'계_{age}세': f'{age}세 (명)' for age in range(25, 36)}
-    col_rename_map['동'] = '읍·면·동'
-    col_rename_map['청년인구'] = '25~35세 총 청년수 (명)'
-    
+    col_rename_map['시군구'] = '시·군·구'
     result_df = result_df.rename(columns=col_rename_map)
     
-    # 청년 인원수가 많은 동부터 내림차순 정렬
+    # 총 청년 인원수 기준 내림차순 정렬
+    result_df = result_df.sort_values(by='25~35세 총 청년수 (명)', ascending=False).reset_index(drop=True)
+    
+    st.markdown(f"**[{selected_sido}] 시·군·구별 25~35세 연령별 인원수**")
+
+else:
+    # --- B. 선택한 시·군·구 내 읍·면·동 단위로 집계 ---
+    sigungu_df = sido_dong_df[sido_dong_df['시군구'] == selected_sigungu].copy()
+    
+    display_cols = ['동'] + age_cols + ['청년인구']
+    result_df = sigungu_df[display_cols].copy()
+    
+    col_rename_map['동'] = '읍·면·동'
+    result_df = result_df.rename(columns=col_rename_map)
+    
+    # 총 청년 인원수 기준 내림차순 정렬
     result_df = result_df.sort_values(by='25~35세 총 청년수 (명)', ascending=False).reset_index(drop=True)
     
     st.markdown(f"**[{selected_sido} {selected_sigungu}] 읍·면·동별 25~35세 연령별 인원수**")
-    
-    # 숫자에 천 단위 쉼표(,) 적용하여 출력
-    format_dict = {col: '{:,}' for col in result_df.columns if col != '읍·면·동'}
+
+# 표 출력 (숫자에 천 단위 쉼표 적용)
+if not result_df.empty:
+    first_col = result_df.columns[0]  # '시·군·구' 또는 '읍·면·동'
+    format_dict = {col: '{:,}' for col in result_df.columns if col != first_col}
     st.dataframe(result_df.style.format(format_dict), use_container_width=True)
