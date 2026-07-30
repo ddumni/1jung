@@ -1,4 +1,4 @@
-#jemini 25-35세 비율
+#jemini 25-35 ver2
 import streamlit as st
 import pandas as pd
 import requests
@@ -42,7 +42,6 @@ def load_data():
     df_latest['총인구'] = df_latest[total_cols].sum(axis=1)
     
     # 시군구코드(5자리) 기준으로 그룹화하여 합산
-    # (시도, 시군구 이름은 대표값 1개 선택)
     grouped = df_latest.groupby('시군구코드').agg({
         '시도': 'first',
         '시군구': 'first',
@@ -127,7 +126,7 @@ st.plotly_chart(fig, use_container_width=True)
 st.divider()
 
 # 5. 하단 순위 표 (상위 10개, 하위 10개 나란히 배치)
-st.subheader("📊 시군구별 청년 비율 극단값 비교")
+st.subheader("📊 전국 시군구별 청년 비율 극단값 비교")
 
 col1, col2 = st.columns(2)
 
@@ -144,3 +143,58 @@ with col2:
     bottom10_display = bottom10[['시도', '시군구', '청년비율']].reset_index(drop=True)
     bottom10_display.columns = ['시도', '시군구', '청년 비율 (%)']
     st.dataframe(bottom10_display, use_container_width=True)
+
+st.divider()
+
+# 6. 지역(시·도)별 청년 인구 세부 분석 표 추가
+st.subheader("🏙️ 지역(시·도)별 시·군·구 청년 인구 분석")
+
+# 시·도 목록 추출 및 셀렉트박스 생성
+sido_list = sorted(df_sigungu['시도'].dropna().unique())
+selected_sido = st.selectbox("분석할 지역(시·도)을 선택하세요:", sido_list)
+
+# 선택된 시·도의 데이터만 필터링
+sido_df = df_sigungu[df_sigungu['시도'] == selected_sido].copy()
+
+if not sido_df.empty:
+    # 해당 시·도 내 전체 청년 인구 및 총인구 계산
+    total_sido_youth = sido_df['청년인구'].sum()
+    total_sido_pop = sido_df['총인구'].sum()
+    sido_youth_ratio = (total_sido_youth / total_sido_pop) * 100
+
+    # 주요 지표(Metric) 카드 출력
+    m_col1, m_col2, m_col3 = st.columns(3)
+    m_col1.metric(label=f"{selected_sido} 전체 청년 인구", value=f"{total_sido_youth:,} 명")
+    m_col2.metric(label=f"{selected_sido} 전체 인구", value=f"{total_sido_pop:,} 명")
+    m_col3.metric(label=f"{selected_sido} 평균 청년 비율", value=f"{sido_youth_ratio:.2f} %")
+
+    # 선택된 시·도 내부 청년 점유율(선택된 시·도 청년 중 해당 시군구가 차지하는 비중) 계산
+    sido_df['시도 내 청년 점유율 (%)'] = (sido_df['청년인구'] / total_sido_youth) * 100
+    sido_df['시도 내 청년 점유율 (%)'] = sido_df['시도 내 청년 점유율 (%)'].round(2)
+
+    # 출력용 데이터프레임 정리 (청년 비율 높은 순으로 정렬)
+    analysis_df = sido_df.sort_values(by='청년비율', ascending=False)[
+        ['시군구', '청년인구', '총인구', '청년비율', '시도 내 청년 점유율 (%)']
+    ].reset_index(drop=True)
+
+    # 컬럼 이름 한국어로 변경
+    analysis_df.columns = [
+        '시·군·구', 
+        '청년 인구수 (명)', 
+        '총 인구수 (명)', 
+        '청년 비율 (%)', 
+        '시·도 내 청년 점유율 (%)'
+    ]
+
+    st.markdown(f"**[{selected_sido}] 하위 시·군·구별 청년 인구 현황** (청년 비율 높은 순)")
+    
+    # 테이블 출력 (숫자 포맷 지정)
+    st.dataframe(
+        analysis_df.style.format({
+            '청년 인구수 (명)': '{:,}',
+            '총 인구수 (명)': '{:,}',
+            '청년 비율 (%)': '{:.2f}',
+            '시·도 내 청년 점유율 (%)': '{:.2f}'
+        }),
+        use_container_width=True
+    )
